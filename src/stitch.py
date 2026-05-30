@@ -100,7 +100,7 @@ def show_matches(img1, kp1, img2, kp2, good_matches):
 
 
 # ──────────────────────────────────────────
-# Step 4: Homography + Warping
+# Step 4: Homography
 # ──────────────────────────────────────────
 
 def compute_homography(kp1, kp2, good_matches):
@@ -125,12 +125,15 @@ def compute_homography(kp1, kp2, good_matches):
     return H
 
 
+# ──────────────────────────────────────────
+# Step 5: Warp + Alpha Blend + Crop
+# ──────────────────────────────────────────
+
 def warp_and_stitch(img1, img2, H):
     """Warp img1 to align with img2 and stitch them together."""
     h1, w1 = img1.shape[:2]
     h2, w2 = img2.shape[:2]
 
-    # Corners of img1 warped into img2 space
     corners_img1 = np.float32([
         [0, 0], [0, h1], [w1, h1], [w1, 0]
     ]).reshape(-1, 1, 2)
@@ -142,11 +145,9 @@ def warp_and_stitch(img1, img2, H):
     warped_corners = cv2.perspectiveTransform(corners_img1, H)
     all_corners = np.concatenate((corners_img2, warped_corners), axis=0)
 
-    # Find bounding box
     [x_min, y_min] = np.int32(all_corners.min(axis=0).ravel())
     [x_max, y_max] = np.int32(all_corners.max(axis=0).ravel())
 
-    # Translation matrix to shift into positive coordinates
     translation = np.array([
         [1, 0, -x_min],
         [0, 1, -y_min],
@@ -155,14 +156,59 @@ def warp_and_stitch(img1, img2, H):
 
     output_size = (x_max - x_min, y_max - y_min)
 
-    # Warp img1 into panorama space
+    # Warp img1
     warped = cv2.warpPerspective(img1, translation @ H, output_size)
 
-    # Paste img2 into the panorama
-    warped[-y_min:h2 + (-y_min), -x_min:w2 + (-x_min)] = img2
+    # Create alpha blend mask
+    mask1 = np.zeros((output_size[1], output_size[0]), dtype=np.float32)
+    cv2.warpPerspective(
+        np.ones((h1, w1), dtype=np.float32),
+        translation @ H,
+        output_size,
+        dst=mask1
+    )
 
-    print(f"\n✅ Panorama size: {warped.shape}")
-    return warped
+    # Place img2
+    y_off = -y_min
+    x_off = -x_min
+    result = warped.copy()
+    result[y_off:y_off + h2, x_off:x_off + w2] = img2
+
+    # Blend overlapping region smoothly
+    mask2 = np.zeros((output_size[1], output_size[0]), dtype=np.float32)
+    mask2[y_off:y_off + h2, x_off:x_off + w2] = 1.0
+
+    overlap = (mask1 > 0) & (mask2 > 0)
+    for c in range(3):
+        result[:, :, c] = np.where(
+            overlap,
+            (warped[:, :, c] * 0.5 + result[:, :, c] * 0.5).astype(np.uint8),
+            result[:, :, c]
+        )
+
+    print(f"\n✅ Panorama stitched: {result.shape}")
+    return result
+
+
+def crop_black_borders(img):
+    """Automatically crop black borders from panorama."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
+
+    # Find bounding box of non-black area
+    coords = cv2.findNonZero(thresh)
+    x, y, w, h = cv2.boundingRect(coords)
+
+    # Add small padding
+    pad = 10
+    x = max(x + pad, 0)
+    y = max(y + pad, 0)
+    w = min(w - pad * 2, img.shape[1] - x)
+    h = min(h - pad * 2, img.shape[0] - y)
+
+    cropped = img[y:y + h, x:x + w]
+    print(f"✅ Cropped size: {cropped.shape}")
+    return cropped
 
 
 def show_panorama(panorama):
@@ -208,5 +254,8 @@ if __name__ == "__main__":
     # 7. Warp and stitch
     panorama = warp_and_stitch(img1, img2, H)
 
-    # 8. Show final panorama
+    # 8. Crop black borders
+    panorama = crop_black_borders(panorama)
+
+    # 9. Show final panorama
     show_panorama(panorama)
