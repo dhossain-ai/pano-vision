@@ -175,49 +175,33 @@ def warp_and_stitch(img1, img2, H):
 # ──────────────────────────────────────────
 
 def crop_black_borders(img):
-    """
-    Find the largest inner rectangle with zero black pixels
-    by scanning row-by-row and col-by-col boundaries.
-    """
+    """Crop using fill-ratio per row/col — works on warped panoramas."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 5, 255, cv2.THRESH_BINARY)
 
     h, w = thresh.shape
 
-    # For every row → find leftmost & rightmost content pixel
-    row_left  = []
-    row_right = []
-    for r in range(h):
-        cols = np.where(thresh[r, :] > 0)[0]
-        if len(cols) > 0:
-            row_left.append(cols[0])
-            row_right.append(cols[-1])
-        else:
-            row_left.append(w)
-            row_right.append(0)
+    # Check what fraction of each row/col is non-black
+    row_fill = thresh.sum(axis=1) / (w * 255)  # 0.0 to 1.0
+    col_fill = thresh.sum(axis=0) / (h * 255)  # 0.0 to 1.0
 
-    # For every col → find topmost & bottommost content pixel
-    col_top    = []
-    col_bottom = []
-    for c in range(w):
-        rows_c = np.where(thresh[:, c] > 0)[0]
-        if len(rows_c) > 0:
-            col_top.append(rows_c[0])
-            col_bottom.append(rows_c[-1])
-        else:
-            col_top.append(h)
-            col_bottom.append(0)
+    # Keep only rows/cols that are at least 80% filled
+    threshold = 0.80
+    valid_rows = np.where(row_fill > threshold)[0]
+    valid_cols = np.where(col_fill > threshold)[0]
 
-    # Largest safe inner rectangle
-    col_start = int(max(row_left))
-    col_end   = int(min(row_right))
-    row_start = int(max(col_top))
-    row_end   = int(min(col_bottom))
+    if len(valid_rows) == 0 or len(valid_cols) == 0:
+        print("⚠️ Fallback crop used")
+        coords = cv2.findNonZero(thresh)
+        x, y, bw, bh = cv2.boundingRect(coords)
+        pad = max(bw, bh) // 10
+        return img[y+pad : y+bh-pad, x+pad : x+bw-pad]
+
+    r1, r2 = int(valid_rows[0]),  int(valid_rows[-1])
+    c1, c2 = int(valid_cols[0]),  int(valid_cols[-1])
 
     pad = 5
-    cropped = img[row_start+pad : row_end-pad,
-                  col_start+pad : col_end-pad]
-
+    cropped = img[r1+pad : r2-pad, c1+pad : c2-pad]
     print(f"✅ Final cropped size: {cropped.shape}")
     return cropped
 
