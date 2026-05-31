@@ -113,8 +113,8 @@ def warp_and_stitch(img1, img2, H):
     corners_img2 = np.float32(
         [[0,0],[0,h2],[w2,h2],[w2,0]]).reshape(-1,1,2)
 
-    warped_corners  = cv2.perspectiveTransform(corners_img1, H)
-    all_corners     = np.concatenate((corners_img2, warped_corners), axis=0)
+    warped_corners = cv2.perspectiveTransform(corners_img1, H)
+    all_corners    = np.concatenate((corners_img2, warped_corners), axis=0)
 
     [x_min, y_min] = np.int32(all_corners.min(axis=0).ravel())
     [x_max, y_max] = np.int32(all_corners.max(axis=0).ravel())
@@ -128,16 +128,13 @@ def warp_and_stitch(img1, img2, H):
     output_size = (x_max - x_min, y_max - y_min)
     W, H_out = output_size
 
-    # ── Warp img1 ──
     warped1 = cv2.warpPerspective(img1, translation @ H, output_size)
 
-    # ── Mask of warped img1 ──
     mask1 = cv2.warpPerspective(
         np.ones((h1, w1), dtype=np.float32),
         translation @ H, output_size
     )
 
-    # ── Place img2 ──
     y_off, x_off = -y_min, -x_min
     canvas = np.zeros((H_out, W, 3), dtype=np.uint8)
     canvas[y_off:y_off+h2, x_off:x_off+w2] = img2
@@ -145,10 +142,8 @@ def warp_and_stitch(img1, img2, H):
     mask2 = np.zeros((H_out, W), dtype=np.float32)
     mask2[y_off:y_off+h2, x_off:x_off+w2] = 1.0
 
-    # ── Gradient blend in overlap zone ──
     overlap = (mask1 > 0) & (mask2 > 0)
 
-    # Build horizontal gradient weights across overlap
     overlap_cols = np.where(overlap.any(axis=0))[0]
     blend = np.zeros((H_out, W), dtype=np.float32)
 
@@ -157,22 +152,15 @@ def warp_and_stitch(img1, img2, H):
         col_end   = overlap_cols[-1]
         for col in range(col_start, col_end + 1):
             t = (col - col_start) / max(col_end - col_start, 1)
-            blend[:, col] = t   # 0 = use warped1 fully, 1 = use canvas fully
+            blend[:, col] = t
 
-    # Final composite
     result = np.zeros_like(canvas, dtype=np.float32)
     for c in range(3):
-        w1_ch  = warped1[:, :, c].astype(np.float32)
-        w2_ch  = canvas[:, :, c].astype(np.float32)
-
-        # In overlap: gradient blend
+        w1_ch = warped1[:, :, c].astype(np.float32)
+        w2_ch = canvas[:, :, c].astype(np.float32)
         blended = w1_ch * (1 - blend) + w2_ch * blend
-
-        # Only warped1 (no img2)
         only1 = (mask1 > 0) & ~overlap
-        # Only img2 (no warped1)
         only2 = (mask2 > 0) & ~overlap
-
         result[:, :, c] = np.where(overlap, blended,
                           np.where(only1, w1_ch,
                           np.where(only2, w2_ch, 0)))
@@ -183,29 +171,54 @@ def warp_and_stitch(img1, img2, H):
 
 
 # ──────────────────────────────────────────
-# Step 6: Crop Black Borders
+# Step 7: Smart Crop — Largest Inner Rectangle
 # ──────────────────────────────────────────
 
 def crop_black_borders(img):
-    """Crop black borders using largest inner rectangle."""
+    """
+    Find the largest inner rectangle with zero black pixels
+    by scanning row-by-row and col-by-col boundaries.
+    """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 5, 255, cv2.THRESH_BINARY)
 
-    # Find the largest valid rectangle row by row
-    rows = np.any(thresh > 0, axis=1)
-    cols = np.any(thresh > 0, axis=0)
+    h, w = thresh.shape
 
-    row_start = np.argmax(rows)
-    row_end   = len(rows) - np.argmax(rows[::-1])
-    col_start = np.argmax(cols)
-    col_end   = len(cols) - np.argmax(cols[::-1])
+    # For every row → find leftmost & rightmost content pixel
+    row_left  = []
+    row_right = []
+    for r in range(h):
+        cols = np.where(thresh[r, :] > 0)[0]
+        if len(cols) > 0:
+            row_left.append(cols[0])
+            row_right.append(cols[-1])
+        else:
+            row_left.append(w)
+            row_right.append(0)
 
-    # Tighter inner crop to remove all black corners
-    pad = 20
+    # For every col → find topmost & bottommost content pixel
+    col_top    = []
+    col_bottom = []
+    for c in range(w):
+        rows_c = np.where(thresh[:, c] > 0)[0]
+        if len(rows_c) > 0:
+            col_top.append(rows_c[0])
+            col_bottom.append(rows_c[-1])
+        else:
+            col_top.append(h)
+            col_bottom.append(0)
+
+    # Largest safe inner rectangle
+    col_start = int(max(row_left))
+    col_end   = int(min(row_right))
+    row_start = int(max(col_top))
+    row_end   = int(min(col_bottom))
+
+    pad = 5
     cropped = img[row_start+pad : row_end-pad,
                   col_start+pad : col_end-pad]
 
-    print(f"✅ Cropped size: {cropped.shape}")
+    print(f"✅ Final cropped size: {cropped.shape}")
     return cropped
 
 
@@ -250,7 +263,7 @@ if __name__ == "__main__":
     # 7. Warp + Gradient Blend
     panorama = warp_and_stitch(img1, img2, H)
 
-    # 8. Crop black borders
+    # 8. Smart crop
     panorama = crop_black_borders(panorama)
 
     # 9. Final result
